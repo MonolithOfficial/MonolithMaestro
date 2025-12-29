@@ -182,6 +182,23 @@ void PitchDetector::performFFTAnalysis()
 
     // Sort by magnitude (strongest first)
     std::sort(detectedNotes_.begin(), detectedNotes_.end());
+
+    // Filter out weak notes: only keep notes within 40% of the strongest note's magnitude
+    // This ensures only genuinely played notes are shown, not weak harmonics/artifacts
+    if (!detectedNotes_.empty())
+    {
+        float strongestMagnitude = detectedNotes_[0].magnitude;
+        float relativeThreshold = strongestMagnitude * 0.4f;  // 40% of strongest
+
+        // Keep only notes above relative threshold
+        detectedNotes_.erase(
+            std::remove_if(detectedNotes_.begin(), detectedNotes_.end(),
+                [relativeThreshold](const DetectedNote& note) {
+                    return note.magnitude < relativeThreshold;
+                }),
+            detectedNotes_.end()
+        );
+    }
 }
 
 std::vector<DetectedNote> PitchDetector::getDetectedNotes() const
