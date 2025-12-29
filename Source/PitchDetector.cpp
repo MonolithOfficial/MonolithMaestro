@@ -245,7 +245,7 @@ juce::String PitchDetector::midiNoteToName(int midiNote) const
         return "Invalid";
 
     int noteIndex = midiNote % 12;
-    int octave = (midiNote / 12) - 1;
+    int octave = (midiNote / 12);  // Scientific pitch notation: C5 = middle C
 
     juce::String result = noteNames_[noteIndex];
     result << octave;
