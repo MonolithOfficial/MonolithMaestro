@@ -138,10 +138,28 @@ void PitchDetector::performFFTAnalysis()
         }
     }
 
-    // Convert filtered peaks to notes
+    // Convert filtered peaks to notes with parabolic interpolation for accuracy
     for (const auto& peakIndex : filteredPeakIndices)
     {
-        float frequency = peakIndex * static_cast<float>(sampleRate_) / fftSize_;
+        // Parabolic interpolation for sub-bin accuracy
+        float refinedPeakIndex = static_cast<float>(peakIndex);
+
+        if (peakIndex > 0 && peakIndex < static_cast<int>(magnitudes.size()) - 1)
+        {
+            float left = magnitudes[peakIndex - 1];
+            float center = magnitudes[peakIndex];
+            float right = magnitudes[peakIndex + 1];
+
+            // Parabolic interpolation: delta = 0.5 * (left - right) / (left - 2*center + right)
+            float denominator = left - 2.0f * center + right;
+            if (std::abs(denominator) > 0.0001f)  // Avoid division by zero
+            {
+                float delta = 0.5f * (left - right) / denominator;
+                refinedPeakIndex = peakIndex + delta;
+            }
+        }
+
+        float frequency = refinedPeakIndex * static_cast<float>(sampleRate_) / fftSize_;
         int midiNote = frequencyToMidiNote(frequency);
 
         if (midiNote < 0 || midiNote > 127)
