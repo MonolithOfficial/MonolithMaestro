@@ -4,6 +4,27 @@
 MonolithMaestroEditor::MonolithMaestroEditor(MonolithMaestroProcessor& p)
     : AudioProcessorEditor(&p), processorRef(p)
 {
+    // Setup record button
+    recordButton_.setButtonText("Record");
+    recordButton_.onClick = [this] { recordButtonClicked(); };
+    addAndMakeVisible(recordButton_);
+
+    // Setup recorded notes display
+    recordedNotesDisplay_.setMultiLine(true);
+    recordedNotesDisplay_.setReadOnly(true);
+    recordedNotesDisplay_.setScrollbarsShown(true);
+    recordedNotesDisplay_.setCaretVisible(false);
+    recordedNotesDisplay_.setFont(juce::Font(14.0f));
+    recordedNotesDisplay_.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff2a2a2a));
+    recordedNotesDisplay_.setColour(juce::TextEditor::textColourId, juce::Colours::white);
+    recordedNotesDisplay_.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff444444));
+    addAndMakeVisible(recordedNotesDisplay_);
+
+    // Setup copy button
+    copyButton_.setButtonText("Copy");
+    copyButton_.onClick = [this] { copyButtonClicked(); };
+    addAndMakeVisible(copyButton_);
+
     startTimer(50);  // Update display at 20Hz
     setSize(500, 800);
 }
@@ -95,10 +116,90 @@ void MonolithMaestroEditor::paint(juce::Graphics& g)
 
 void MonolithMaestroEditor::resized()
 {
+    auto bounds = getLocalBounds();
+
+    // Reserve space for title (top 100px)
+    bounds.removeFromTop(100);
+
+    // Top section: real-time note display (300px)
+    auto noteDisplayArea = bounds.removeFromTop(300);
+
+    // Middle section: record button (80px)
+    auto recordButtonArea = bounds.removeFromTop(80);
+    recordButton_.setBounds(recordButtonArea.reduced(150, 20));
+
+    // Bottom section: recorded notes display + copy button
+    auto bottomArea = bounds;
+    auto copyButtonArea = bottomArea.removeFromBottom(50);
+    copyButton_.setBounds(copyButtonArea.reduced(180, 10));
+
+    recordedNotesDisplay_.setBounds(bottomArea.reduced(20, 10));
 }
 
 void MonolithMaestroEditor::timerCallback()
 {
     currentNotes_ = processorRef.getDetectedNotes();
     repaint();
+}
+
+void MonolithMaestroEditor::recordButtonClicked()
+{
+    if (!processorRef.isRecording())
+    {
+        // Start recording
+        processorRef.startRecording();
+        recordButton_.setButtonText("Stop");
+        recordButton_.setColour(juce::TextButton::buttonColourId, juce::Colours::red);
+        recordedNotesDisplay_.clear();
+    }
+    else
+    {
+        // Stop recording
+        auto notes = processorRef.stopRecording();
+        auto key = processorRef.getDetectedKey();
+        recordButton_.setButtonText("Record");
+        recordButton_.setColour(juce::TextButton::buttonColourId, juce::Colours::grey);
+        updateRecordedNotesDisplay(notes, key);
+    }
+}
+
+void MonolithMaestroEditor::copyButtonClicked()
+{
+    juce::String textToCopy = recordedNotesDisplay_.getText();
+    if (textToCopy.isNotEmpty())
+    {
+        juce::SystemClipboard::copyTextToClipboard(textToCopy);
+
+        // Provide feedback
+        auto originalText = copyButton_.getButtonText();
+        copyButton_.setButtonText("Copied!");
+
+        // Reset button text after 1 second
+        juce::Timer::callAfterDelay(1000, [this, originalText]() {
+            copyButton_.setButtonText(originalText);
+        });
+    }
+}
+
+void MonolithMaestroEditor::updateRecordedNotesDisplay(const std::vector<juce::String>& notes, const juce::String& key)
+{
+    juce::String displayText;
+
+    if (notes.empty())
+    {
+        displayText = "No notes recorded.\n\nPlay some notes and press Record to capture them!";
+    }
+    else
+    {
+        displayText << "Recorded Notes:\n";
+        for (size_t i = 0; i < notes.size(); ++i)
+        {
+            displayText << notes[i];
+            if (i < notes.size() - 1)
+                displayText << " → ";
+        }
+        displayText << "\n\nDetected Key: " << key;
+    }
+
+    recordedNotesDisplay_.setText(displayText, false);
 }
