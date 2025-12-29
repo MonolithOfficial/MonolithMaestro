@@ -1,0 +1,395 @@
+================================================================================
+PITCH DETECTOR INTEGRATION EXAMPLE
+================================================================================
+
+This file shows how to integrate the PitchDetector into your PluginProcessor
+and display detected notes in the GUI.
+
+IMPORTANT: This is an EXAMPLE only. To use this code:
+1. Copy the relevant sections into your actual source files
+2. Rebuild your project with CMake
+3. Test the implementation
+
+================================================================================
+STEP 1: Update PluginProcessor.h
+================================================================================
+
+Add this include at the top:
+    #include "PitchDetector.h"
+
+Add this to the private section of MonolithMaestroProcessor:
+
+    // Pitch detection
+    PitchDetector pitchDetector_;
+
+    // Public getter for detected notes (GUI can call this)
+public:
+    std::vector<DetectedNote> getDetectedNotes() const
+    {
+        return pitchDetector_.getDetectedNotes();
+    }
+
+    bool isPitchDetectorActive() const
+    {
+        return pitchDetector_.isActive();
+    }
+
+================================================================================
+STEP 2: Update PluginProcessor.cpp
+================================================================================
+
+In prepareToPlay(), initialize the pitch detector:
+
+void MonolithMaestroProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    // Initialize pitch detector with audio specs
+    pitchDetector_.prepare(sampleRate, samplesPerBlock);
+
+    // Optional: Configure thresholds
+    pitchDetector_.setMagnitudeThreshold(0.02f);  // Adjust sensitivity
+    pitchDetector_.setNoiseGateThreshold(0.001f); // Adjust noise gate
+}
+
+In releaseResources(), clean up:
+
+void MonolithMaestroProcessor::releaseResources()
+{
+    // Reset pitch detector when playback stops
+    pitchDetector_.reset();
+}
+
+In processBlock(), feed audio to the pitch detector:
+
+void MonolithMaestroProcessor::processBlock(juce::AudioBuffer<float>& buffer,
+                                          juce::MidiBuffer& midiMessages)
+{
+    juce::ignoreUnused(midiMessages);
+    juce::ScopedNoDenormals noDenormals;
+
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    // Clear extra output channels
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+
+    // PITCH DETECTION:
+    // ================
+    // We'll analyze the first channel (left in stereo, only in mono)
+    // For stereo, you could:
+    // - Analyze left channel only (simplest)
+    // - Analyze right channel only
+    // - Mix both channels to mono first (best for stereo)
+    // - Analyze both separately (most CPU intensive)
+
+    if (totalNumInputChannels > 0)
+    {
+        // Get pointer to first channel's audio data
+        const float* channelData = buffer.getReadPointer(0);
+        int numSamples = buffer.getNumSamples();
+
+        // Process audio through pitch detector
+        pitchDetector_.processAudioBlock(channelData, numSamples);
+    }
+
+    // Audio passes through unchanged (this is an analyzer, not an effect)
+}
+
+================================================================================
+STEP 3: Update PluginEditor.h (for displaying detected notes)
+================================================================================
+
+Add to the private section of MonolithMaestroEditor:
+
+    // Timer for updating the display
+    class UpdateTimer : public juce::Timer
+    {
+    public:
+        UpdateTimer(MonolithMaestroEditor& ed) : editor(ed) {}
+
+        void timerCallback() override
+        {
+            editor.repaint();  // Trigger a redraw
+        }
+
+    private:
+        MonolithMaestroEditor& editor;
+    };
+
+    UpdateTimer updateTimer;
+
+Initialize in the constructor initializer list:
+    , updateTimer(*this)
+
+Start the timer in the constructor body:
+    updateTimer.startTimerHz(30);  // Update 30 times per second
+
+================================================================================
+STEP 4: Update PluginEditor.cpp (paint method)
+================================================================================
+
+In the paint() method, display the detected notes:
+
+void MonolithMaestroEditor::paint(juce::Graphics& g)
+{
+    // Background
+    g.fillAll(getLookAndFeel().findColour(
+        juce::ResizableWindow::backgroundColourId));
+
+    // Get detected notes from processor
+    auto notes = processorRef.getDetectedNotes();
+
+    // Display header
+    g.setColour(juce::Colours::white);
+    g.setFont(20.0f);
+    g.drawFittedText("Monolith Maestro - Pitch Detector",
+                     getLocalBounds().removeFromTop(40),
+                     juce::Justification::centred, 1);
+
+    // Display pitch detector status
+    bool isActive = processorRef.isPitchDetectorActive();
+    g.setFont(14.0f);
+    g.setColour(isActive ? juce::Colours::green : juce::Colours::grey);
+    g.drawFittedText(isActive ? "DETECTING" : "NO SIGNAL",
+                     10, 50, 200, 20,
+                     juce::Justification::left, 1);
+
+    // Display detected notes
+    if (!notes.empty())
+    {
+        int y = 80;
+        g.setFont(16.0f);
+        g.setColour(juce::Colours::white);
+
+        for (const auto& note : notes)
+        {
+            // Format: "C4 (261.63 Hz) - Magnitude: 0.45"
+            juce::String noteText = note.noteName +
+                                   " (" + juce::String(note.frequency, 2) + " Hz)" +
+                                   " - Strength: " + juce::String(note.magnitude, 3);
+
+            g.drawFittedText(noteText, 10, y, getWidth() - 20, 25,
+                           juce::Justification::left, 1);
+
+            // Draw a simple bar graph for magnitude
+            float barWidth = note.magnitude * 200.0f;
+            g.setColour(juce::Colours::lightblue);
+            g.fillRect(10.0f, static_cast<float>(y + 25), barWidth, 5.0f);
+
+            y += 40;
+        }
+    }
+    else if (isActive)
+    {
+        g.setColour(juce::Colours::grey);
+        g.setFont(14.0f);
+        g.drawFittedText("Listening for notes...",
+                         10, 80, getWidth() - 20, 20,
+                         juce::Justification::left, 1);
+    }
+    else
+    {
+        g.setColour(juce::Colours::grey);
+        g.setFont(14.0f);
+        g.drawFittedText("Play some audio to detect pitches!",
+                         10, 80, getWidth() - 20, 20,
+                         juce::Justification::left, 1);
+    }
+}
+
+================================================================================
+ADVANCED: Stereo to Mono Mixing (Optional)
+================================================================================
+
+For better results with stereo input, mix both channels to mono before analysis:
+
+void MonolithMaestroProcessor::processBlock(juce::AudioBuffer<float>& buffer,
+                                          juce::MidiBuffer& midiMessages)
+{
+    // ... (existing code) ...
+
+    if (totalNumInputChannels > 0)
+    {
+        int numSamples = buffer.getNumSamples();
+
+        if (totalNumInputChannels == 1)
+        {
+            // Mono: analyze directly
+            const float* monoData = buffer.getReadPointer(0);
+            pitchDetector_.processAudioBlock(monoData, numSamples);
+        }
+        else
+        {
+            // Stereo: mix to mono
+            // Allocate a temporary buffer for the mixed audio
+            // NOTE: In production, pre-allocate this in prepare() to avoid allocations
+            std::vector<float> monoBuffer(numSamples);
+
+            const float* leftChannel = buffer.getReadPointer(0);
+            const float* rightChannel = buffer.getReadPointer(1);
+
+            for (int i = 0; i < numSamples; ++i)
+            {
+                // Simple average (L + R) / 2
+                monoBuffer[i] = (leftChannel[i] + rightChannel[i]) * 0.5f;
+            }
+
+            pitchDetector_.processAudioBlock(monoBuffer.data(), numSamples);
+        }
+    }
+}
+
+BETTER VERSION (avoiding allocation in audio thread):
+Add to PluginProcessor.h private section:
+    std::vector<float> monoMixBuffer_;
+
+In prepareToPlay():
+    monoMixBuffer_.resize(samplesPerBlock);
+
+In processBlock():
+    if (totalNumInputChannels >= 2)
+    {
+        int numSamples = buffer.getNumSamples();
+        monoMixBuffer_.resize(numSamples);  // Resize if needed (rare)
+
+        const float* leftChannel = buffer.getReadPointer(0);
+        const float* rightChannel = buffer.getReadPointer(1);
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            monoMixBuffer_[i] = (leftChannel[i] + rightChannel[i]) * 0.5f;
+        }
+
+        pitchDetector_.processAudioBlock(monoMixBuffer_.data(), numSamples);
+    }
+
+================================================================================
+TROUBLESHOOTING
+================================================================================
+
+Problem: No notes detected even with audio playing
+Solutions:
+- Lower magnitudeThreshold (try 0.01 or even 0.005)
+- Lower noiseGateThreshold (try 0.0001)
+- Check that audio is actually reaching the plugin
+- Make sure you're analyzing the correct channel
+
+Problem: Too many false positives / noise detected as notes
+Solutions:
+- Raise magnitudeThreshold (try 0.05 or 0.1)
+- Raise noiseGateThreshold (try 0.01)
+- Filter low frequencies (they often contain noise)
+
+Problem: Notes are slightly off-pitch
+This is normal! FFT has limited frequency resolution:
+- At 44.1 kHz with 2048 FFT: ~21.5 Hz per bin
+- Some musical notes are only 30-40 Hz apart
+- For better accuracy, use larger FFT (4096 or 8192)
+- Or implement peak interpolation (advanced)
+
+Problem: High CPU usage
+Solutions:
+- Process less frequently (skip some audio blocks)
+- Use smaller FFT size (1024 instead of 2048)
+- Process only when audio is above threshold
+- Run pitch detection on a separate thread (advanced)
+
+================================================================================
+FURTHER IMPROVEMENTS (Advanced)
+================================================================================
+
+1. Peak Interpolation:
+   Instead of just using the FFT bin frequency, interpolate between bins
+   for more accurate frequency estimation. (Google "parabolic interpolation FFT")
+
+2. Harmonic Product Spectrum (HPS):
+   Better for finding fundamental frequencies of harmonic sounds.
+   Reduces false positives from overtones.
+
+3. Autocorrelation:
+   Different approach to pitch detection, better for some types of audio.
+   More CPU intensive than FFT.
+
+4. Adaptive Thresholding:
+   Automatically adjust thresholds based on average noise level.
+
+5. Note Smoothing:
+   Track notes over time, require stability before displaying.
+   Reduces flickering in the UI.
+
+6. Cents Display:
+   Show how many cents sharp/flat each note is (for tuner functionality).
+
+7. Multi-threaded Processing:
+   Run FFT on a background thread to reduce audio thread load.
+   Use lock-free queue to pass data between threads.
+
+================================================================================
+EXAMPLE OUTPUT
+================================================================================
+
+When playing a C major chord (C4, E4, G4), you might see:
+
+    DETECTING
+
+    C4 (261.63 Hz) - Strength: 0.082
+    ████████████████▌
+
+    E4 (329.63 Hz) - Strength: 0.074
+    ██████████████▊
+
+    G4 (392.00 Hz) - Strength: 0.068
+    █████████████▌
+
+================================================================================
+COMPLETE MINIMAL EXAMPLE FILES
+================================================================================
+
+See the actual source files for the complete working example:
+- C:/Users/Monolith/Desktop/FBI/Monolith_Maestro/Source/PitchDetector.h
+- C:/Users/Monolith/Desktop/FBI/Monolith_Maestro/Source/PitchDetector.cpp
+
+These files contain extensive comments explaining every concept for
+developers transitioning from Java to C++.
+
+================================================================================
+KEY CONCEPTS LEARNED
+================================================================================
+
+From this pitch detection implementation, you've learned:
+
+1. FFT ANALYSIS:
+   - Converting time domain (waveforms) to frequency domain (spectrum)
+   - Windowing functions (Hann window)
+   - Magnitude spectrum calculation
+
+2. MUSICAL MATHEMATICS:
+   - Frequency to MIDI note conversion
+   - Equal temperament tuning (12-TET)
+   - Logarithmic frequency scale
+
+3. C++ CONCEPTS:
+   - RAII (Resource Acquisition Is Initialization)
+   - Smart pointers (std::unique_ptr)
+   - STL containers (std::vector, std::array)
+   - Template programming
+   - Move semantics
+   - Const correctness
+   - Operator overloading
+   - Lambda expressions
+
+4. REAL-TIME AUDIO:
+   - Thread safety (std::atomic)
+   - Lock-free programming (AbstractFifo)
+   - Memory pre-allocation
+   - CPU efficiency considerations
+
+5. DSP FUNDAMENTALS:
+   - Circular buffers (FIFO)
+   - RMS calculation
+   - Noise gating
+   - Peak detection
+
+This is production-ready code that you can use and extend for your own projects!
+
+================================================================================

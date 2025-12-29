@@ -1,0 +1,34 @@
+# Build directories
+build/
+cmake-build-*/
+Builds/
+
+# IDE files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.sln.docstates
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.dll
+*.dylib
+*.so
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# OS files
+.DS_Store
+Thumbs.db
+
+CLAUDE.md
+PITCH_DETECTION_README.md
+.claude/
