@@ -17,7 +17,10 @@ PitchDetector::PitchDetector()
     }
 
     fifoBuffer_.resize(fftSize_, 0.0f);
-    detectedNotes_.reserve(maxPolyphony_);
+    detectedNotes_.reserve(maxNotes_);
+
+    // Initialize frequency-to-note mapping
+    initializeFrequencyMap();
 }
 
 //==============================================================================
@@ -64,6 +67,14 @@ void PitchDetector::processAudioBlock(const float* audioData, int numSamples)
 
 void PitchDetector::performFFTAnalysis()
 {
+    //==============================================================================
+    // Simple Monophonic Pitch Detection:
+    // 1. Find the strongest frequency peak in the FFT spectrum
+    // 2. Use parabolic interpolation for sub-bin accuracy
+    // 3. Map the frequency to a note using predefined frequency ranges
+    // 4. No harmonic filtering - the loudest frequency is the detected note
+    //==============================================================================
+
     // Read samples from FIFO
     int start1, size1, start2, size2;
     fifo_.prepareToRead(fftSize_, start1, size1, start2, size2);
@@ -94,111 +105,129 @@ void PitchDetector::performFFTAnalysis()
         fftMagnitudes_[i] = std::sqrt(real * real + imag * imag) / fftSize_;
     }
 
-    // Find peaks and convert to notes
-    std::vector<float> magnitudes(fftMagnitudes_.getData(), fftMagnitudes_.getData() + fftSize_ / 2);
-    auto peakIndices = findPeaks(magnitudes);
+    // Monophonic detection: find the strongest peak in the spectrum
+    candidateNotes_.clear();
 
-    detectedNotes_.clear();
-    std::vector<int> filteredPeakIndices;
+    // Skip first 2 bins (DC and very low frequency noise)
+    // Bin 2 = ~21 Hz with 4096 FFT, allowing detection down to ~40 Hz (low E on bass)
+    int strongestBin = 2;
+    float strongestMagnitude = fftMagnitudes_[2];
 
-    // Harmonic filtering: Remove peaks that are harmonics (2x, 3x, 4x) of lower peaks
-    // Process peaks by frequency (low to high) to preserve fundamentals
-    std::vector<int> peaksByFrequency = peakIndices;
-    std::sort(peaksByFrequency.begin(), peaksByFrequency.end());
-
-    for (const auto& peakIndex : peaksByFrequency)
+    for (int i = 3; i < fftSize_ / 2; ++i)
     {
-        float frequency = peakIndex * static_cast<float>(sampleRate_) / fftSize_;
-
-        // Check if this peak is a harmonic of any lower peak
-        bool isHarmonic = false;
-        for (const auto& lowerPeakIndex : filteredPeakIndices)
+        if (fftMagnitudes_[i] > strongestMagnitude)
         {
-            float lowerFreq = lowerPeakIndex * static_cast<float>(sampleRate_) / fftSize_;
-
-            // Check 2nd, 3rd, 4th harmonics with 10% tolerance
-            for (int harmonic = 2; harmonic <= 4; ++harmonic)
-            {
-                float expectedHarmonic = lowerFreq * harmonic;
-                float tolerance = lowerFreq * 0.1f;
-
-                if (std::abs(frequency - expectedHarmonic) < tolerance)
-                {
-                    isHarmonic = true;
-                    break;
-                }
-            }
-            if (isHarmonic)
-                break;
-        }
-
-        if (!isHarmonic)
-        {
-            filteredPeakIndices.push_back(peakIndex);
+            strongestMagnitude = fftMagnitudes_[i];
+            strongestBin = i;
         }
     }
 
-    // Convert filtered peaks to notes with parabolic interpolation for accuracy
-    for (const auto& peakIndex : filteredPeakIndices)
+    // Only process if magnitude is above threshold
+    if (strongestMagnitude > magnitudeThreshold_)
     {
         // Parabolic interpolation for sub-bin accuracy
-        float refinedPeakIndex = static_cast<float>(peakIndex);
+        float refinedPeakIndex = static_cast<float>(strongestBin);
 
-        if (peakIndex > 0 && peakIndex < static_cast<int>(magnitudes.size()) - 1)
+        if (strongestBin > 0 && strongestBin < fftSize_ / 2 - 1)
         {
-            float left = magnitudes[peakIndex - 1];
-            float center = magnitudes[peakIndex];
-            float right = magnitudes[peakIndex + 1];
+            float left = fftMagnitudes_[strongestBin - 1];
+            float center = fftMagnitudes_[strongestBin];
+            float right = fftMagnitudes_[strongestBin + 1];
 
             // Parabolic interpolation: delta = 0.5 * (left - right) / (left - 2*center + right)
             float denominator = left - 2.0f * center + right;
-            if (std::abs(denominator) > 0.0001f)  // Avoid division by zero
+            if (std::abs(denominator) > 0.0001f)
             {
                 float delta = 0.5f * (left - right) / denominator;
-                refinedPeakIndex = peakIndex + delta;
+                refinedPeakIndex = strongestBin + delta;
             }
         }
 
+        // Convert bin to frequency
         float frequency = refinedPeakIndex * static_cast<float>(sampleRate_) / fftSize_;
-        int midiNote = frequencyToMidiNote(frequency);
 
-        if (midiNote < 0 || midiNote > 127)
-            continue;
+        // Look up which note this frequency belongs to
+        const auto* noteRange = findNoteForFrequency(frequency);
 
-        float magnitude = magnitudes[peakIndex];
+        if (noteRange != nullptr)
+        {
+            DetectedNote note;
+            note.noteName = noteRange->noteName;
+            note.frequency = frequency;
+            note.magnitude = strongestMagnitude;
+            note.midiNoteNumber = noteRange->midiNoteNumber;
 
-        DetectedNote note {
-            midiNoteToName(midiNote),
-            frequency,
-            magnitude,
-            midiNote
-        };
-
-        detectedNotes_.push_back(note);
-
-        if (detectedNotes_.size() >= maxPolyphony_)
-            break;
+            candidateNotes_.push_back(note);
+        }
     }
 
-    // Sort by magnitude (strongest first)
-    std::sort(detectedNotes_.begin(), detectedNotes_.end());
+    // Apply note stability tracking
+    updateNoteStability();
+}
 
-    // Filter out weak notes: only keep notes within 40% of the strongest note's magnitude
-    // This ensures only genuinely played notes are shown, not weak harmonics/artifacts
-    if (!detectedNotes_.empty())
+void PitchDetector::updateNoteStability()
+{
+    // Update history for each candidate note
+    for (const auto& candidate : candidateNotes_)
     {
-        float strongestMagnitude = detectedNotes_[0].magnitude;
-        float relativeThreshold = strongestMagnitude * 0.4f;  // 40% of strongest
+        // Find if this note exists in history
+        auto it = std::find_if(noteHistory_.begin(), noteHistory_.end(),
+            [&candidate](const NoteHistory& h) { return h.midiNote == candidate.midiNoteNumber; });
 
-        // Keep only notes above relative threshold
-        detectedNotes_.erase(
-            std::remove_if(detectedNotes_.begin(), detectedNotes_.end(),
-                [relativeThreshold](const DetectedNote& note) {
-                    return note.magnitude < relativeThreshold;
-                }),
-            detectedNotes_.end()
-        );
+        if (it != noteHistory_.end())
+        {
+            // Note is continuing - increment counter
+            it->consecutiveFrames++;
+            it->totalMagnitude += candidate.magnitude;
+        }
+        else
+        {
+            // New note - add to history
+            NoteHistory newHistory;
+            newHistory.midiNote = candidate.midiNoteNumber;
+            newHistory.consecutiveFrames = 1;
+            newHistory.totalMagnitude = candidate.magnitude;
+            noteHistory_.push_back(newHistory);
+        }
     }
+
+    // Decay/remove notes not in current candidates
+    for (auto it = noteHistory_.begin(); it != noteHistory_.end();)
+    {
+        bool stillPresent = std::any_of(candidateNotes_.begin(), candidateNotes_.end(),
+            [&it](const DetectedNote& note) { return note.midiNoteNumber == it->midiNote; });
+
+        if (!stillPresent)
+        {
+            // Note disappeared - remove from history
+            it = noteHistory_.erase(it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
+    // Build stable detectedNotes_ from history
+    detectedNotes_.clear();
+    for (const auto& history : noteHistory_)
+    {
+        // Only report notes that have been stable for required frames
+        if (history.consecutiveFrames >= stabilityFramesRequired_)
+        {
+            // Find the actual note in candidates to get current frequency/magnitude
+            auto candidateIt = std::find_if(candidateNotes_.begin(), candidateNotes_.end(),
+                [&history](const DetectedNote& note) { return note.midiNoteNumber == history.midiNote; });
+
+            if (candidateIt != candidateNotes_.end())
+            {
+                detectedNotes_.push_back(*candidateIt);
+            }
+        }
+    }
+
+    // Sort by magnitude
+    std::sort(detectedNotes_.begin(), detectedNotes_.end());
 }
 
 std::vector<DetectedNote> PitchDetector::getDetectedNotes() const
@@ -213,6 +242,8 @@ void PitchDetector::reset()
     std::fill(fifoBuffer_.begin(), fifoBuffer_.end(), 0.0f);
     fifo_.reset();
     detectedNotes_.clear();
+    candidateNotes_.clear();
+    noteHistory_.clear();
     isActive_.store(false, std::memory_order_relaxed);
 }
 
@@ -227,36 +258,40 @@ void PitchDetector::setNoiseGateThreshold(float threshold)
 }
 
 //==============================================================================
-std::vector<int> PitchDetector::findPeaks(const std::vector<float>& magnitudes)
+void PitchDetector::initializeFrequencyMap()
 {
-    std::vector<std::pair<float, int>> peaks;
+    // Create frequency ranges for notes from C1 (MIDI 24, ~33 Hz) to C7 (MIDI 96)
+    // This covers bass guitars (low E = 41 Hz), pianos, and most instruments
+    frequencyMap_.clear();
 
-    // Find local maxima (skip first 4 bins to avoid DC and low-frequency noise)
-    for (int i = 4; i < static_cast<int>(magnitudes.size()) - 1; ++i)
+    for (int midiNote = 24; midiNote <= 96; ++midiNote)
     {
-        if (magnitudes[i] > magnitudeThreshold_ &&
-            magnitudes[i] > magnitudes[i - 1] &&
-            magnitudes[i] > magnitudes[i + 1])
+        NoteFrequencyRange range;
+        range.midiNoteNumber = midiNote;
+        range.noteName = midiNoteToName(midiNote);
+        range.centerFrequency = midiNoteToFrequency(midiNote);
+
+        // Calculate boundaries as geometric mean between adjacent notes
+        float lowerNoteFreq = midiNoteToFrequency(midiNote - 1);
+        float upperNoteFreq = midiNoteToFrequency(midiNote + 1);
+
+        range.minFrequency = std::sqrt(lowerNoteFreq * range.centerFrequency);
+        range.maxFrequency = std::sqrt(range.centerFrequency * upperNoteFreq);
+
+        frequencyMap_.push_back(range);
+    }
+}
+
+const PitchDetector::NoteFrequencyRange* PitchDetector::findNoteForFrequency(float frequency) const
+{
+    for (const auto& range : frequencyMap_)
+    {
+        if (frequency >= range.minFrequency && frequency < range.maxFrequency)
         {
-            peaks.emplace_back(magnitudes[i], i);
+            return &range;
         }
     }
-
-    // Sort by magnitude (descending)
-    std::sort(peaks.begin(), peaks.end(),
-        [](const auto& a, const auto& b) { return a.first > b.first; });
-
-    // Extract top N peak indices
-    std::vector<int> peakIndices;
-    peakIndices.reserve(maxPolyphony_);
-
-    int numPeaks = std::min(static_cast<int>(peaks.size()), maxPolyphony_);
-    for (int i = 0; i < numPeaks; ++i)
-    {
-        peakIndices.push_back(peaks[i].second);
-    }
-
-    return peakIndices;
+    return nullptr;  // Frequency out of range
 }
 
 int PitchDetector::frequencyToMidiNote(float frequency) const
@@ -280,11 +315,9 @@ juce::String PitchDetector::midiNoteToName(int midiNote) const
         return "Invalid";
 
     int noteIndex = midiNote % 12;
-    int octave = (midiNote / 12);  // Scientific pitch notation: C5 = middle C
 
-    juce::String result = noteNames_[noteIndex];
-    result << octave;
-    return result;
+    // Return just the note name without octave number
+    return noteNames_[noteIndex];
 }
 
 float PitchDetector::midiNoteToFrequency(int midiNote) const

@@ -13,7 +13,7 @@
  */
 struct DetectedNote
 {
-    juce::String noteName;     ///< Note name (e.g., "C4", "A#5")
+    juce::String noteName;     ///< Note name without octave (e.g., "C", "A#")
     float frequency;           ///< Frequency in Hz
     float magnitude;           ///< Strength/loudness of the frequency
     int midiNoteNumber;        ///< MIDI note number (0-127)
@@ -27,10 +27,11 @@ struct DetectedNote
 
 //==============================================================================
 /**
- * Polyphonic pitch detector using FFT analysis.
+ * Monophonic pitch detector using FFT analysis and frequency mapping.
  *
- * Analyzes incoming audio to detect up to 4 simultaneous notes in real-time.
- * Uses FFT for frequency analysis and harmonic filtering to isolate fundamentals.
+ * Analyzes incoming audio to detect the strongest note in real-time.
+ * Uses FFT to find the dominant frequency and maps it to musical notes
+ * using predefined frequency ranges.
  */
 class PitchDetector
 {
@@ -38,6 +39,16 @@ public:
     //==============================================================================
     PitchDetector();
     ~PitchDetector() = default;
+
+    /** Frequency range mapping for a musical note. */
+    struct NoteFrequencyRange
+    {
+        juce::String noteName;
+        float minFrequency;
+        float maxFrequency;
+        float centerFrequency;
+        int midiNoteNumber;
+    };
 
     //==============================================================================
     /**
@@ -96,13 +107,8 @@ private:
     /** Performs FFT analysis on accumulated audio buffer. */
     void performFFTAnalysis();
 
-    /**
-     * Finds peaks in FFT magnitude spectrum.
-     *
-     * @param magnitudes FFT magnitude values
-     * @return Vector of peak indices sorted by magnitude
-     */
-    std::vector<int> findPeaks(const std::vector<float>& magnitudes);
+    /** Updates note stability tracking and builds stable detected notes list. */
+    void updateNoteStability();
 
     /**
      * Converts frequency in Hz to MIDI note number.
@@ -116,7 +122,7 @@ private:
      * Converts MIDI note number to note name string.
      *
      * @param midiNote MIDI note number (0-127)
-     * @return Note name (e.g., "C4", "A#5")
+     * @return Note name without octave (e.g., "C", "A#")
      */
     juce::String midiNoteToName(int midiNote) const;
 
@@ -139,9 +145,9 @@ private:
 
     //==============================================================================
     // FFT Configuration
-    static constexpr int fftOrder_ = 11;                      ///< FFT order (2048 samples)
-    static constexpr int fftSize_ = 1 << fftOrder_;           ///< FFT size (2048)
-    static constexpr int maxPolyphony_ = 4;                   ///< Max simultaneous notes
+    static constexpr int fftOrder_ = 12;                      ///< FFT order (4096 samples for better low-freq resolution)
+    static constexpr int fftSize_ = 1 << fftOrder_;           ///< FFT size (4096)
+    static constexpr int maxNotes_ = 1;                       ///< Monophonic detection (single note)
 
     // FFT Processing
     std::unique_ptr<juce::dsp::FFT> fft_;                     ///< FFT processor
@@ -159,6 +165,16 @@ private:
 
     // Detection Results
     std::vector<DetectedNote> detectedNotes_;                 ///< Currently detected notes
+    std::vector<DetectedNote> candidateNotes_;                ///< Candidate notes from latest frame
+
+    // Note Stability Tracking
+    struct NoteHistory {
+        int midiNote = -1;
+        int consecutiveFrames = 0;
+        float totalMagnitude = 0.0f;
+    };
+    std::vector<NoteHistory> noteHistory_;                    ///< Track note stability
+    static constexpr int stabilityFramesRequired_ = 2;        ///< Frames needed to confirm note (reduced for faster response)
 
     // Thresholds
     float magnitudeThreshold_ = 0.02f;                        ///< Min peak magnitude
@@ -171,6 +187,21 @@ private:
     const std::array<juce::String, 12> noteNames_ = {
         "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
     };
+
+    // Frequency-to-Note Mapping
+    std::vector<NoteFrequencyRange> frequencyMap_;
+
+    //==============================================================================
+    /** Initializes the frequency-to-note mapping table. */
+    void initializeFrequencyMap();
+
+    /**
+     * Finds which note a frequency belongs to.
+     *
+     * @param frequency Frequency in Hz
+     * @return Pointer to NoteFrequencyRange or nullptr if out of range
+     */
+    const NoteFrequencyRange* findNoteForFrequency(float frequency) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PitchDetector)
 };
